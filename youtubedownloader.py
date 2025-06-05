@@ -4,6 +4,8 @@ import yt_dlp
 import os
 import subprocess
 import threading
+import math # Import math for progress bar calculation
+import platform # To identify the OS for opening the folder after download
 
 
 class YouTubeDownloader:
@@ -13,7 +15,8 @@ class YouTubeDownloader:
         self.selected_streams = None
         self.video_info = None
         self.style = ttk.Style(self.root)
-        self.download_path = os.getcwd() # Default download path to current working directory
+        self.download_path = os.path.join(os.path.expanduser("~"), "Downloads")  # Default to Downloads folder
+        self.open_folder_after_download = tk.BooleanVar(value=True) # Initialize the new option
 
         # Initialize widgets creation
         self.create_widgets()
@@ -92,7 +95,7 @@ Enjoy downloading!
     def create_widgets(self):
         # Dark mode toggle button in top-left corner
         self.mode_button = ttk.Button(self.root, text="", command=self.toggle_theme, width=3)
-        # Using pack with side "right" to keep it small and at the top
+        # Using pack with side "left" to keep it small and at the top
         self.mode_button.pack(anchor="nw", padx=10, pady=5)
 
         # URL entry
@@ -112,9 +115,21 @@ Enjoy downloading!
         # Download path selection
         frame_path = ttk.LabelFrame(self.root, text="Download location")
         frame_path.pack(padx=10, pady=10, fill="x")
-        self.path_label = ttk.Label(frame_path, text=f"Download Path: {self.download_path}")
-        self.path_label.pack(side="left", padx=5, pady=5, expand=True, fill="x")
-        ttk.Button(frame_path, text="Change Path", command=self.select_download_path).pack(side="left", padx=5)
+
+        path_controls_frame = ttk.Frame(frame_path) # New frame for path label and button
+        path_controls_frame.pack(side="left", expand=True, fill="x")
+
+        self.path_label = ttk.Label(path_controls_frame, text=f"Download Path: {self.download_path}")
+        self.path_label.pack(side="left", padx=(5,0), pady=5, expand=True, fill="x") # Adjust padding
+        ttk.Button(path_controls_frame, text="Change Path", command=self.select_download_path).pack(side="left", padx=5)
+
+        # Checkbutton to open folder after download
+        self.open_folder_checkbutton = ttk.Checkbutton(
+            frame_path,
+            text="Open folder after download",
+            variable=self.open_folder_after_download
+        )
+        self.open_folder_checkbutton.pack(side="left", padx=10, pady=5)
 
         # Listbox to display available streams and quality information
         frame_streams = ttk.LabelFrame(self.root, text="Available Streams")
@@ -131,6 +146,10 @@ Enjoy downloading!
         # Progress bar
         self.progress = ttk.Progressbar(self.root, mode='indeterminate')
         self.progress.pack(pady=5, padx=10, fill="x")
+
+        # Optional: Add a label to show progress text (e.g., percentage, speed)
+        self.progress_label = ttk.Label(self.root, text="")
+        self.progress_label.pack(pady=2)
 
     # Download path selection dialog
     def select_download_path(self):
@@ -167,6 +186,10 @@ Enjoy downloading!
                            indicatorcolor=[('selected', dark_fg), ('!selected', dark_fg)]) # Style indicator too
             self.style.configure("TScrollbar", background=dark_bg, troughcolor=entry_bg)
             self.style.configure("TProgressbar", background=entry_bg, troughcolor=dark_bg)
+            self.style.configure("TCheckbutton", background=dark_bg, foreground=dark_fg) # Style for Checkbutton
+            self.style.map("TCheckbutton",
+                           indicatorcolor=[('selected', dark_fg), ('!selected', dark_fg)], # Style indicator
+                           background=[('active', dark_bg)])
 
 
             # For tk.Listbox (not a ttk widget, so configure directly)
@@ -179,6 +202,9 @@ Enjoy downloading!
             # Update path_label color for dark mode
             if hasattr(self, 'path_label'):
                 self.path_label.configure(background=dark_bg, foreground=dark_fg)
+            # Update progress_label color for dark mode
+            if hasattr(self, 'progress_label'):
+                 self.progress_label.configure(background=dark_bg, foreground=dark_fg)
 
             self.mode_button.config(text="☀️")
 
@@ -205,6 +231,11 @@ Enjoy downloading!
                            indicatorcolor=[('selected', light_fg), ('!selected', light_fg)])
             self.style.configure("TScrollbar", background=light_bg, troughcolor=light_bg) # Revert
             self.style.configure("TProgressbar", background=light_bg, troughcolor=light_bg) # Revert
+            self.style.configure("TCheckbutton", background=light_bg, foreground=light_fg) # Style for Checkbutton
+            self.style.map("TCheckbutton",
+                           indicatorcolor=[('selected', light_fg), ('!selected', light_fg)], # Style indicator
+                           background=[('active', light_bg)])
+
 
             # For tk.Listbox
             self.streams_listbox.configure(
@@ -216,6 +247,9 @@ Enjoy downloading!
             # Update path_label color for light mode
             if hasattr(self, 'path_label'): # Check if path_label exists
                 self.path_label.configure(background=light_bg, foreground=light_fg)
+            # Update progress_label color for light mode
+            if hasattr(self, 'progress_label'):
+                 self.progress_label.configure(background=light_bg, foreground=light_fg)
 
             self.mode_button.config(text="🌙")
 
@@ -295,7 +329,82 @@ Enjoy downloading!
             self.streams_listbox.insert(tk.END, f"No suitable {self.type.get().lower()} formats found.")
 
 
+
+    def _progress_hook(self, d):
+        """
+        yt-dlp progress hook to update the Tkinter progress bar.
+        This runs in the download thread, so updates to Tkinter widgets
+        must be scheduled using self.root.after().
+        """
+        if d['status'] == 'downloading':
+            # d['total_bytes'] or d['total_bytes_estimate'] might be None initially
+            total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
+            downloaded_bytes = d.get('downloaded_bytes')
+
+            if total_bytes is not None and downloaded_bytes is not None and total_bytes > 0:
+                 # Use math.isfinite to check for potential inf or NaN values
+                 if math.isfinite(total_bytes) and math.isfinite(downloaded_bytes):
+                    percentage = downloaded_bytes / total_bytes * 100
+                    # Schedule update on the main thread
+                    self.root.after(0, self._update_progress_bar, percentage, d.get('speed'))
+                 else:
+                     # Handle non-finite values if necessary, maybe switch to indeterminate
+                     self.root.after(0, self._update_progress_bar, -1, None) # Use -1 to indicate indeterminate or error state
+
+        elif d['status'] == 'finished':
+            # Schedule update on the main thread to set to 100% and stop
+            self.root.after(0, self._update_progress_bar, 100, None)
+            self.root.after(0, lambda: self.progress_label.config(text="Download Complete!")) # Update label on finish
+            if self.open_folder_after_download.get():
+                self.root.after(100, self._open_download_folder) # Add a small delay
+
+        elif d['status'] == 'error':
+             # Schedule update on the main thread to stop and potentially reset
+             self.root.after(0, self._update_progress_bar, 0, None) # Reset or set to 0 on error
+             self.root.after(0, lambda: self.progress_label.config(text="Download Failed")) # Update label on error
+
+
+    def _update_progress_bar(self, percentage, speed):
+        """Updates the progress bar and label from the main thread."""
+        if percentage >= 0: # Check if percentage is a valid number
+            if self.progress['mode'] == 'indeterminate': # Switch from indeterminate if needed
+                self.progress.stop()
+                self.progress['mode'] = 'determinate'
+            self.progress['value'] = percentage
+            if speed is not None:
+                 # Convert speed from bytes/sec to KB/s or MB/s
+                 if speed > 1024 * 1024:
+                     speed_str = f"{speed / (1024 * 1024):.2f} MiB/s"
+                 elif speed > 1024:
+                     speed_str = f"{speed / 1024:.2f} KiB/s"
+                 else:
+                     speed_str = f"{speed:.2f} B/s"
+                 self.progress_label.config(text=f"{percentage:.1f}% at {speed_str}")
+            else:
+                 self.progress_label.config(text=f"{percentage:.1f}%")
+        else: # Handle indeterminate state or error state
+             if self.progress['mode'] == 'determinate': # Switch to indeterminate if needed
+                 self.progress['mode'] = 'indeterminate'
+             self.progress.start() # Go back to indeterminate if needed
+             self.progress_label.config(text="Processing...") # Or an error message
+
+
+    def _open_download_folder(self):
+        """Opens the download folder in the system's file explorer."""
+        path = self.download_path
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin": # macOS
+                subprocess.run(["open", path], check=True)
+            else: # Linux and other UNIX-like systems
+                subprocess.run(["xdg-open", path], check=True)
+        except Exception as e:
+            messagebox.showwarning("Open Folder Error", f"Could not open folder: {path}\n{e}")
+
+
     def download_selected(self):
+        # ... (existing selection validation) ...
         selection = self.streams_listbox.curselection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a stream from the list.")
@@ -312,50 +421,53 @@ Enjoy downloading!
 
         selected_format = self.selected_streams[index]
 
-        self.progress.start()
+        # Start indeterminate progress bar while setting up download
+        self.progress['mode'] = 'determinate'
+        self.progress['value'] = 0 # Reset progress
+        self.progress_label.config(text="Starting download...") # Update label
         threading.Thread(target=self._download_thread, args=(selected_format,), daemon=True).start()
+
 
     def _download_thread(self, selected_format):
         try:
-            # Use the selected download_path
             save_path = self.download_path
-
-            # Clean filename template
             filename_template = '%(title)s.%(ext)s'
 
+            ydl_opts = {
+                'format': str(selected_format['format_id']),
+                'outtmpl': os.path.join(save_path, filename_template),
+                'progress_hooks': [self._progress_hook], # Add the progress hook here
+                'quiet': True, # Keep quiet for yt-dlp's default output
+                'no_warnings': True,
+                # 'cookiefile': 'path/to/your/cookies.txt',
+            }
+
             if self.type.get() == "Audio":
-                ydl_opts = {
-                    'format': str(selected_format['format_id']),
-                    'outtmpl': os.path.join(save_path, filename_template),
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                    'postprocessor_args': [
-                        '-ar', '44100'
-                    ],
-                }
-            else:
-                ydl_opts = {
-                    'format': str(selected_format['format_id']),
-                    'outtmpl': os.path.join(save_path, filename_template),
-                }
+                # Add audio postprocessors if needed
+                 ydl_opts['postprocessors'] = [{
+                     'key': 'FFmpegExtractAudio',
+                     'preferredcodec': 'mp3',
+                     'preferredquality': '192',
+                 }]
+                 ydl_opts['postprocessor_args'] = ['-ar', '44100']
+
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([self.video_info['webpage_url']])
 
-            file_type = "Audio" if self.type.get() == "Audio" else "Video"
-            self.root.after(0, lambda: messagebox.showinfo("Success",
-                                                           f"{file_type} downloaded successfully to:\n{save_path}"))
+            # Success message is now handled by the 'finished' status in the hook
+            # self.root.after(0, lambda: messagebox.showinfo("Success", ...))
 
         except Exception as e:
             error_msg = str(e)
             if "ffmpeg" in error_msg.lower():
                 error_msg += "\n\nNote: FFmpeg is required for audio conversion. Please install FFmpeg."
             self.root.after(0, lambda: messagebox.showerror("Error", f"Download failed:\n{error_msg}"))
+            # Error status is also handled by the 'error' status in the hook
         finally:
-            self.root.after(0, self.progress.stop)
+            # progress.stop() is now handled by the hook's 'finished' or 'error' status
+            pass # No need to stop here anymore
+
 
 
 def main():
